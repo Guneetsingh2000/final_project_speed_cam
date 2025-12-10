@@ -1,0 +1,15 @@
+*.pt
+*.mp4
+*.mov
+*.avi
+*.csv
+*.json
+*.log
+*.npy
+*.npz
+
+__pycache__/
+runs/
+data/
+videos/
+synthetic_plates/
