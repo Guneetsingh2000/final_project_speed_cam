@@ -1,29 +1,16 @@
-version: "3.9"
-
 services:
   backend:
     build:
-      context: .
-      dockerfile: backend/Dockerfile
-    container_name: speedcam-backend
+      context: backend
+      dockerfile: Dockerfile
     ports:
       - "8000:8000"
-    volumes:
-      # Optional: if you want the model/runs synced from host
-      - ./yolov8n.pt:/app/yolov8n.pt
-      - ./runs_car_dataset:/app/runs_car_dataset
-    environment:
-      - PYTHONUNBUFFERED=1
+    container_name: speedcam-backend
 
   frontend:
     build:
-      context: .
-      dockerfile: frontend/Dockerfile
-    container_name: speedcam-frontend
-    depends_on:
-      - backend
+      context: frontend
+      dockerfile: Dockerfile
     ports:
       - "8501:8501"
-    environment:
-      - BACKEND_URL=http://backend:8000
-      - PYTHONUNBUFFERED=1
+    container_name: speedcam-frontend

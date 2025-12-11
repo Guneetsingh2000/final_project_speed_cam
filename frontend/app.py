@@ -1,92 +1,92 @@
-import streamlit as st
-import tempfile
-import pandas as pd
-from backend.main import analyze_video_file
+# backend/main.py
+
+import os
+import shutil
+import uuid
+from pathlib import Path
+
+from fastapi import FastAPI, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+
+# ✅ Adjust these imports to match your existing files
+from . import speed  # your speed processing module
+# If you already have typed schemas, you can import them instead of using dict
 
 
-st.set_page_config(
-    page_title="AI Speed Camera",
-    layout="wide",
+# === Paths ===
+BASE_DIR = Path(__file__).resolve().parent
+UPLOAD_DIR = BASE_DIR / "uploads"
+UPLOAD_DIR.mkdir(exist_ok=True)
+
+app = FastAPI(
+    title="SpeedCam Backend",
+    description="YOLO + tracking speed estimation backend for the Streamlit frontend.",
+    version="1.0.0",
 )
 
-st.title("AI-Based Vehicle Speed Monitoring System")
-st.write(
-    "Upload a road traffic video and this app will detect vehicles, "
-    "estimate their speeds using computer vision, and flag overspeeding events."
+# === CORS so Streamlit Cloud / localhost can talk to this ===
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],   # you can restrict later
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# Sidebar controls
-with st.sidebar:
-    st.header("Speed Settings")
-    speed_limit = st.number_input("Speed limit (km/h)", 0.0, 200.0, 60.0, step=5.0)
-    grace_kmh = st.number_input("Grace above limit (km/h)", 0.0, 50.0, 5.0, step=1.0)
 
-    st.markdown("---")
-    st.write("After upload, click **Run Analysis** to process the video.")
+@app.get("/")
+def root():
+    return {
+        "status": "ok",
+        "message": "SpeedCam FastAPI backend running.",
+    }
 
 
-uploaded_video = st.file_uploader(
-    "Upload traffic video (.mp4, .mov, .avi)",
-    type=["mp4", "mov", "avi"],
-)
+@app.post("/analyze_video")
+async def analyze_video(file: UploadFile = File(...)):
+    """
+    Receive an uploaded video, save to temp, run the speed pipeline,
+    and return JSON results.
+    """
 
-run_clicked = st.button("Run Analysis", disabled=uploaded_video is None)
+    # 1) Save upload to a temporary file
+    ext = Path(file.filename).suffix or ".mp4"
+    tmp_name = f"{uuid.uuid4().hex}{ext}"
+    tmp_path = UPLOAD_DIR / tmp_name
 
-if uploaded_video is None:
-    st.info("Please upload a video to begin.")
-else:
-    st.video(uploaded_video)
+    with tmp_path.open("wb") as f:
+        shutil.copyfileobj(file.file, f)
 
-if uploaded_video is not None and run_clicked:
-    # Save the uploaded video to a temporary file
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
-        tmp.write(uploaded_video.getbuffer())
-        temp_video_path = tmp.name
+    # 2) Run your existing speed pipeline
+    #    🔴 IMPORTANT: change `run_speed_estimation` to whatever function
+    #    you already use that takes a video path and returns a dict.
+    #    For example, if you had speed.process_video(tmp_path) use that instead.
+    try:
+        result = speed.run_speed_estimation(str(tmp_path))
+        # expected shape (example):
+        # {
+        #   "summary": {...},
+        #   "overspeed_events": [...],
+        #   "within_limit": [...]
+        # }
+    except Exception as e:
+        # Clean up before raising
+        if tmp_path.exists():
+            tmp_path.unlink()
+        return {"status": "error", "detail": str(e)}
 
-    with st.spinner("Analyzing video, this may take a few minutes..."):
-        try:
-            results = analyze_video_file(
-                video_path=temp_video_path,
-                speed_limit_kmh=speed_limit,
-                grace_kmh=grace_kmh,
-            )
-        except Exception as e:
-            st.error(f"Error during analysis: {e}")
-            st.stop()
+    # 3) Clean up temporary file
+    if tmp_path.exists():
+        tmp_path.unlink()
 
-    summary = results.get("summary_stats", {})
-    overspeed_events = results.get("overspeed_events", [])
-    within_limit = results.get("within_limit", [])
+    # 4) Return JSON
+    return {
+        "status": "ok",
+        "data": result,
+    }
 
-    # Layout for results
-    st.subheader("Summary Statistics")
-    if summary:
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Total vehicles", summary.get("num_vehicles", 0))
-        col2.metric("Overspeeding", summary.get("num_overspeed", 0))
-        col3.metric("Within limit", summary.get("num_within_limit", 0))
 
-        st.write(
-            f"Configured speed limit: **{summary.get('speed_limit_kmh', speed_limit)} km/h** "
-            f"with **{summary.get('grace_kmh', grace_kmh)} km/h** grace."
-        )
-    else:
-        st.write("No summary statistics available.")
-
-    st.markdown("---")
-
-    # Overspeed table
-    st.subheader("Overspeeding Vehicles")
-    if overspeed_events:
-        df_over = pd.DataFrame(overspeed_events)
-        st.dataframe(df_over, use_container_width=True)
-    else:
-        st.write("No overspeed events detected.")
-
-    # Within-limit table
-    st.subheader("Within-Limit Vehicles")
-    if within_limit:
-        df_within = pd.DataFrame(within_limit)
-        st.dataframe(df_within, use_container_width=True)
-    else:
-        st.write("No vehicles within limit or insufficient tracking data.")
+# Optional: endpoint to just check health
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
