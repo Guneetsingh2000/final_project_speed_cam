@@ -1,92 +1,125 @@
-# backend/main.py
+# frontend/app.py
 
-import os
-import shutil
-import uuid
-from pathlib import Path
+import json
+import requests
+import streamlit as st
 
-from fastapi import FastAPI, UploadFile, File
-from fastapi.middleware.cors import CORSMiddleware
-
-# ✅ Adjust these imports to match your existing files
-from . import speed  # your speed processing module
-# If you already have typed schemas, you can import them instead of using dict
+DEFAULT_BACKEND_URL = "http://localhost:8000/analyze_video"
 
 
-# === Paths ===
-BASE_DIR = Path(__file__).resolve().parent
-UPLOAD_DIR = BASE_DIR / "uploads"
-UPLOAD_DIR.mkdir(exist_ok=True)
-
-app = FastAPI(
-    title="SpeedCam Backend",
-    description="YOLO + tracking speed estimation backend for the Streamlit frontend.",
-    version="1.0.0",
-)
-
-# === CORS so Streamlit Cloud / localhost can talk to this ===
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],   # you can restrict later
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-@app.get("/")
-def root():
-    return {
-        "status": "ok",
-        "message": "SpeedCam FastAPI backend running.",
-    }
-
-
-@app.post("/analyze_video")
-async def analyze_video(file: UploadFile = File(...)):
-    """
-    Receive an uploaded video, save to temp, run the speed pipeline,
-    and return JSON results.
-    """
-
-    # 1) Save upload to a temporary file
-    ext = Path(file.filename).suffix or ".mp4"
-    tmp_name = f"{uuid.uuid4().hex}{ext}"
-    tmp_path = UPLOAD_DIR / tmp_name
-
-    with tmp_path.open("wb") as f:
-        shutil.copyfileobj(file.file, f)
-
-    # 2) Run your existing speed pipeline
-    #    🔴 IMPORTANT: change `run_speed_estimation` to whatever function
-    #    you already use that takes a video path and returns a dict.
-    #    For example, if you had speed.process_video(tmp_path) use that instead.
+def call_backend(backend_url: str, video_bytes: bytes, filename: str):
+    """Send video file to FastAPI backend and return JSON response."""
+    files = {"file": (filename, video_bytes, "video/mp4")}
     try:
-        result = speed.run_speed_estimation(str(tmp_path))
-        # expected shape (example):
-        # {
-        #   "summary": {...},
-        #   "overspeed_events": [...],
-        #   "within_limit": [...]
-        # }
+        resp = requests.post(backend_url, files=files, timeout=600)
+        resp.raise_for_status()
+    except requests.exceptions.RequestException as e:
+        st.error(f"Error calling backend: {e}")
+        return None
+
+    try:
+        return resp.json()
     except Exception as e:
-        # Clean up before raising
-        if tmp_path.exists():
-            tmp_path.unlink()
-        return {"status": "error", "detail": str(e)}
-
-    # 3) Clean up temporary file
-    if tmp_path.exists():
-        tmp_path.unlink()
-
-    # 4) Return JSON
-    return {
-        "status": "ok",
-        "data": result,
-    }
+        st.error(f"Error parsing backend response as JSON: {e}")
+        return None
 
 
-# Optional: endpoint to just check health
-@app.get("/health")
-def health():
-    return {"status": "healthy"}
+def main():
+    st.set_page_config(page_title="AI Speed Camera", layout="wide")
+
+    st.title("AI-Based Vehicle Speed Monitoring System")
+    st.write(
+        "Upload a road traffic video and this app will detect vehicles, "
+        "estimate their speeds using computer vision, and flag overspeeding events."
+    )
+
+    # Sidebar – settings
+    with st.sidebar:
+        st.header("Backend Settings")
+        backend_url = st.text_input(
+            "Backend /analyze_video URL",
+            value=DEFAULT_BACKEND_URL,
+            help="Make sure your FastAPI backend is running on this URL.",
+        )
+
+        st.markdown("---")
+        st.header("Instructions")
+        st.write(
+            "1. Start the backend (FastAPI)\n"
+            "2. Upload a video below\n"
+            "3. Click **Run Analysis**"
+        )
+
+    # File upload
+    uploaded_video = st.file_uploader(
+        "Upload traffic video (.mp4, .mov, .avi, .mkv)",
+        type=["mp4", "mov", "avi", "mkv"],
+    )
+
+    if uploaded_video is None:
+        st.info("Please upload a video to begin.")
+        return
+
+    # Show video preview
+    st.video(uploaded_video)
+
+    run_clicked = st.button("Run Analysis")
+
+    if not run_clicked:
+        return
+
+    with st.spinner("Sending video to backend and analyzing..."):
+        video_bytes = uploaded_video.read()
+        result = call_backend(backend_url.strip(), video_bytes, uploaded_video.name)
+
+    if result is None:
+        st.stop()
+
+    if result.get("status") != "ok":
+        st.error(f"Backend returned an error: {result}")
+        st.stop()
+
+    data = result.get("data", {})
+
+    summary = data.get("summary_stats", {})
+    overspeed_events = data.get("overspeed_events", [])
+    within_limit = data.get("within_limit", [])
+
+    # === Summary ===
+    st.subheader("Summary Statistics")
+    if summary:
+        c1, c2, c3 = st.columns(3)
+        c1.metric("Total vehicles", summary.get("num_vehicles", 0))
+        c2.metric("Overspeeding", summary.get("num_overspeed", 0))
+        c3.metric("Within limit", summary.get("num_within_limit", 0))
+
+        st.write(
+            f"Speed limit: **{summary.get('speed_limit_kmh', 0)} km/h**  "
+            f"(grace: **{summary.get('grace_kmh', 0)} km/h**)"
+        )
+    else:
+        st.write("No summary statistics returned from backend.")
+
+    st.markdown("---")
+
+    # === Overspeed table ===
+    st.subheader("Overspeeding Vehicles")
+    if overspeed_events:
+        st.table(overspeed_events)
+    else:
+        st.write("No overspeed events detected.")
+
+    # === Within-limit table ===
+    st.subheader("Within-Limit Vehicles")
+    if within_limit:
+        st.table(within_limit)
+    else:
+        st.write("No vehicles within limit or insufficient tracking data.")
+
+    # === Raw JSON (debug) ===
+    with st.expander("Raw JSON response (debug)"):
+        st.code(json.dumps(result, indent=2), language="json")
+
+
+if __name__ == "__main__":
+    main()
